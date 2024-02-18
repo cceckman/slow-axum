@@ -1,0 +1,16 @@
+[package]
+name = "slow-axum"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+axum = { version = "0.7.4", features = ["http1", "query", "tokio", "tower-log", "tracing", "http2", "original-uri"], default-features = false }
+bytes = "1.5.0"
+image = { version = "0.24.8", default-features = false, features = ["png"] }
+maud = { version = "0.26.0", features = ["axum"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.5.1", features = ["trace"] }
+tracing = { version = "0.1.40", features = ["log", "async-await"] }
+tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
