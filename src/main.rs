@@ -10,6 +10,7 @@ use axum::{
     routing::get,
     Router,
 };
+use tokio::{runtime::Handle, task::spawn_blocking};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -17,7 +18,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 ///
 /// This is intentionally not an async sleep!
 /// It's simulating a large CPU-bound computation.
-async fn serve_sleepy() -> impl IntoResponse {
+fn serve_sleepy() -> impl IntoResponse {
     std::thread::sleep(Duration::from_secs(5));
     const IMAGE: &[u8] = include_bytes!("f32.png");
     (
@@ -27,7 +28,7 @@ async fn serve_sleepy() -> impl IntoResponse {
     )
 }
 
-async fn serve_main() -> impl IntoResponse {
+fn serve_main() -> impl IntoResponse {
     const CONTENT: &str = include_str!("index.html");
     (
         StatusCode::OK,
@@ -39,15 +40,99 @@ async fn serve_main() -> impl IntoResponse {
     )
 }
 
-fn router() -> Router {
+fn serve_nonblocking(handle: Handle) -> Router {
+    // Handlers must be Clone + Send + 'static
     Router::new()
-        .route("/", get(serve_main))
-        .route("/stateless/:image", get(|_: Path<String>| serve_sleepy()))
+        .route(
+            "/",
+            get({
+                let handle = handle.clone();
+                || async move {
+                    handle
+                        .spawn_blocking(serve_main)
+                        .await
+                        .expect("failed to join worker thread")
+                }
+            }),
+        )
+        .route(
+            "/stateless/:image",
+            get({
+                let handle = handle.clone();
+                |_: Path<String>| async move {
+                    handle
+                        .spawn_blocking(serve_sleepy)
+                        .await
+                        .expect("failed to join worker thread")
+                }
+            }),
+        )
         .route(
             "/stateful/:image",
-            get(|_: State<String>, _: Path<String>| serve_sleepy()),
+            get({
+                let handle = handle.clone();
+                |_: State<String>, _: Path<String>| async move {
+                    handle
+                        .spawn_blocking(serve_sleepy)
+                        .await
+                        .expect("failed to join worker thread")
+                }
+            }),
         )
-        .with_state("fake state".to_owned())
+        .with_state("nothing".to_owned())
+}
+
+fn serve_spawning(handle: Handle) -> Router {
+    // Handlers must be Clone + Send + 'static
+    Router::new()
+        .route(
+            "/",
+            get({
+                let handle = handle.clone();
+                || async move {
+                    handle
+                        .spawn(async { serve_main() })
+                        .await
+                        .expect("failed to join worker thread")
+                }
+            }),
+        )
+        .route(
+            "/stateless/:image",
+            get({
+                let handle = handle.clone();
+                |_: Path<String>| async move {
+                    handle
+                        .spawn(async { serve_sleepy() })
+                        .await
+                        .expect("failed to join worker thread")
+                }
+            }),
+        )
+        .route(
+            "/stateful/:image",
+            get({
+                let handle = handle.clone();
+                |_: State<String>, _: Path<String>| async move {
+                    handle
+                        .spawn(async { serve_sleepy() })
+                        .await
+                        .expect("failed to join worker thread")
+                }
+            }),
+        )
+        .with_state("nothing".to_owned())
+}
+
+fn serve_blocking() -> Router {
+    Router::new()
+        .route("/", get(|| async { serve_main() }))
+        .route("/stateless/:image", get(|| async { serve_sleepy() }))
+        .route(
+            "/stateful/:image",
+            get(|_: State<String>| async { serve_sleepy() }),
+        )
+        .with_state("nothing".to_owned())
 }
 
 fn main() {
@@ -55,6 +140,7 @@ fn main() {
         .enable_all()
         .build()
         .expect("could not construct Tokio runtime");
+    let h = web_rt.handle().clone();
 
     // Tracing config, from the Axum example:
     tracing_subscriber::registry()
@@ -83,7 +169,9 @@ fn main() {
     });
 
     let server = async move {
-        let app = router().layer(trace);
+        // let app = serve_blocking().layer(trace);
+        // let app = serve_spawning(h).layer(trace);
+        let app = serve_nonblocking(h).layer(trace);
         const ADDR: &str = "0.0.0.0:3000";
         let listener = tokio::net::TcpListener::bind(ADDR).await?;
         tracing::info!("listening at {:?}", ADDR);
